@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <pthread.h>
+#include <termios.h>
 
 // typedefs
 typedef unsigned char byte;
@@ -25,6 +26,7 @@ pthread_t data_thread, input_thread;
 int fd;
 char read_buffer[BUFFSIZE] = {0};
 char write_buffer[BUFFSIZE] = {0};
+struct termios oldt, newt;
 
 int fail(const char* msg, int file_descriptor, int exitcode) {
     printf("%s\n", msg);
@@ -34,11 +36,11 @@ int fail(const char* msg, int file_descriptor, int exitcode) {
     exit(exitcode);
 }
 
-byte negotiate(byte opt_code) {
-    if (opt_code == WILL) return DO;
-    else if (opt_code == DO) return WONT;
+byte deny(byte opt_code) {
+    if (opt_code == WONT) return DONT;
     else if (opt_code == DONT) return WONT;
-    else if (opt_code == WONT) return DONT;
+    else if (opt_code == DO) return WONT;
+    else if (opt_code == WILL) return DONT;
     else return 0;
 }
 
@@ -56,6 +58,8 @@ void sig_handler(int signal)
         pthread_cancel(input_thread);
         pthread_join(input_thread, NULL);
         pthread_join(data_thread, NULL);
+        // Restore old terminal settings.
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
         close(fd);
         exit(1);
     }
@@ -98,8 +102,9 @@ void* receive_handler(void* arg) {
             }
             else if (state == s2) {
                 // Write IAC opt_code current to write buffer.
+                // By default, I am denying all DOs and denying all WILLs.
                 write_buffer[write_buffer_index++] = IAC;
-                write_buffer[write_buffer_index++] = negotiate(opt_code);
+                write_buffer[write_buffer_index++] = deny(opt_code);
                 write_buffer[write_buffer_index++] = current;
                 state = initial;
                 continue;
@@ -120,10 +125,18 @@ void* receive_handler(void* arg) {
 void *input_handler(void* arg) {
     pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+
+    // Saving old terminal state,
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    // Disable canonical mode and echo.
+    // Allows character-at-a-time processing.
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    char c;
     while (1) {
-        fgets(write_buffer, BUFFSIZE, stdin);
-        send(fd, write_buffer, strlen(write_buffer), 0);
-        memset(write_buffer, 0, BUFFSIZE);
+        c = getchar();
+        send(fd, &c, 1, 0);
     }
     return NULL;
 }
@@ -177,6 +190,7 @@ int main(int argc, char** argv) {
 
     pthread_join(input_thread, NULL);
     pthread_join(data_thread, NULL);
+
     close(fd);
     return 0;
 };
